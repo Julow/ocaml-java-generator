@@ -133,6 +133,18 @@ let rec generate_chunk_of_class classes =
 
 	let class_name = module_name in
 
+	let field_name s =
+		if s.[0] = Char.uppercase_ascii s.[0]
+		then "_" ^ s
+		else s
+	in
+
+	let meth_name =
+		function
+		| "<init>"	-> "init_"
+		| s			-> field_name s
+	in
+
 	(* ==== *)
 	(* Generate a class *)
 	(* generating function are expected to returns the pair:
@@ -158,9 +170,9 @@ let rec generate_chunk_of_class classes =
 
 		let static_field sigt =
 			let final ocaml_type value =
-				let fname = fs_name sigt in
-				[ ~% "val %s : %s" fname ocaml_type ],
-				[ ~% "let %s = %s" fname value ]
+				let name = field_name (fs_name sigt) in
+				[ ~% "val %s : %s" name ocaml_type ],
+				[ ~% "let %s = %s" name value ]
 			in
 			function
 			| Some (ConstString s)	-> final "string" (~% "\"%s\"" (jstr_pp s))
@@ -174,8 +186,9 @@ let rec generate_chunk_of_class classes =
 				and type_ = fs_type sigt in
 				let fid = alloc (`Field_static (name, jni_sigt type_)) in
 				let _, call_func, ocaml_type = ocaml_java_conv type_ in
-				[	~% "val %s : unit -> %s" name ocaml_type ],
-				[	~% "let %s () =" name;
+				let name = field_name name in
+				[	~% "val get'%s : unit -> %s" name ocaml_type ],
+				[	~% "let get'%s () =" name;
 					~% "	field_static _cls %s;" fid;
 					~% "	%s ()" call_func ]
 		in
@@ -185,55 +198,73 @@ let rec generate_chunk_of_class classes =
 			and type_ = fs_type sigt in
 			let fid = alloc (`Field (name, jni_sigt type_)) in
 			let _, call_func, ocaml_type = ocaml_java_conv type_ in
-			[	~% "val %s : _ t -> %s" name ocaml_type ],
-			[	~% "let %s obj =" name;
+			let name = field_name name in
+			[	~% "val get'%s : _ t -> %s" name ocaml_type ],
+			[	~% "let get'%s obj =" name;
 				~% "	field obj %s;" fid;
 				~% "	%s ()" call_func ]
 		in
 
 		(** OCaml type of a method *)
+		let meth_args_type =
+			function
+			| []		-> "unit"
+			| args	->
+				String.concat " -> " @@
+				List.map (fun vt ->
+					let _, _, t = ocaml_java_conv vt in t) args
+		in
 		let meth_type sigt =
-			let args = ms_args sigt |> function
-				| []	-> "unit"
-				| args	->
-					String.concat " -> " @@
-					List.map (fun vt ->
-						let _, _, t = ocaml_java_conv vt in t) args
-			in
+			let args = meth_args_type (ms_args sigt) in
 			let _, rtype = ocaml_java_conv_rtype (ms_rtype sigt) in
 			~% "%s -> %s" args rtype
 		in
 
-		let meth alloc s_val s_let s_meth sigt =
-			let name = ms_name sigt |>
-				function "<init>" -> "init_" | n -> n in
-			let args = ms_args sigt in
-			let arg_names =
-				String.concat " " @@
-				List.mapi (fun i _ -> ~% "a%d" i) args
-			in
-			let meth_id = alloc name (jni_meth_sigt sigt) in
+		let arg_name = ~% "a%d" in
+		let arg_names args =
+			String.concat " " @@
+			List.mapi (fun i _ -> arg_name i) args
+		in
+
+		let arg_calls =
+			List.mapi (fun i arg ->
+				let arg_func, _, _ = ocaml_java_conv arg in
+				~% "	%s %s;" arg_func (arg_name i)
+			)
+		in
+
+		let static_meth sigt =
+			let name, args = ms_name sigt, ms_args sigt in
+			let meth_id = alloc (`Meth_static (name, (jni_meth_sigt sigt))) in
 			let call_func, _ = ocaml_java_conv_rtype (ms_rtype sigt) in
-			[	s_val name (meth_type sigt) ],
-			[	s_let name arg_names;
-				s_meth meth_id ]
-			@ List.mapi (fun i arg ->
-					let arg_func, _, _ = ocaml_java_conv arg in
-					~% "	%s a%d;" arg_func i
-				) args @
+			let name = meth_name name in
+			[	~% "val %s : %s" name (meth_type sigt) ],
+			[	~% "let %s %s =" name (arg_names args);
+				~% "	meth_static _cls %s;" meth_id ]
+			@ arg_calls args @
 			[	~% "	%s ()" call_func ]
 		in
 
-		let static_meth =
-			meth (fun name sigt -> alloc (`Meth_static (name, sigt)))
-				~% "val %s : %s"
-				~% "let %s %s ="
-				~% "	meth_static _cls %s;"
-		and meth =
-			meth (fun name sigt -> alloc (`Meth (name, sigt)))
-				~% "val %s : _ t -> %s"
-				~% "let %s obj %s ="
-				~% "	meth obj %s;"
+		let meth sigt =
+			let name, args = ms_name sigt, ms_args sigt in
+			let meth_id = alloc (`Meth (name, (jni_meth_sigt sigt))) in
+			let call_func, _ = ocaml_java_conv_rtype (ms_rtype sigt) in
+			let name = meth_name name in
+			[	~% "val %s : _ t -> %s" name (meth_type sigt) ],
+			[	~% "let %s obj %s =" name (arg_names args);
+				~% "	meth obj %s;" meth_id ]
+			@ arg_calls args @
+			[	~% "	%s ()" call_func ]
+		in
+
+		let constructor sigt =
+			let args = ms_args sigt in
+			let meth_id = alloc (`Constructor (jni_meth_sigt sigt)) in
+			[	~% "val new' : %s -> t' obj" (meth_args_type args) ],
+			[	~% "let new' %s =" (arg_names args);
+				~% "	new_ %s;" meth_id ]
+			@ arg_calls args @
+			[	~% "	of_obj_unsafe (call_obj ())" ]
 		in
 
 		let abstract_meth =
@@ -241,31 +272,30 @@ let rec generate_chunk_of_class classes =
 			| { am_synthetic = true }
 			| { am_access = `Protected }	-> [], []
 			| { am_signature = s }			-> meth s
-		in
-		let concrete_meth =
+		and concrete_meth =
 			function
 			| { cm_synthetic = true }
-			| { cm_access = (`Protected | `Private) }	-> [], []
+			| { cm_access = (`Protected | `Private) }			-> [], []
 			| { cm_signature = s } when ms_name s = "<clinit>"	-> [], []
-			| { cm_static = true; cm_signature = s }	-> static_meth s
-			| { cm_signature = s; _ }					-> meth s
+			| { cm_signature = s } when ms_name s = "<init>"	-> constructor s
+			| { cm_static = true; cm_signature = s }			-> static_meth s
+			| { cm_signature = s; _ }							-> meth s
 		in
 
 		function
 		| JInterface intf	->
-			MethodMap.fold (fun _ m acc ->
-				abstract_meth m @@@ acc
-			) intf.i_methods ([], [])
+			MethodMap.fold (fun _ m acc -> abstract_meth m @@@ acc)
+				intf.i_methods ([], [])
 			|> separate
 			|> FieldMap.fold (fun sigt if_ acc ->
 				static_field sigt if_.if_value
 				@@@ acc
 			) intf.i_fields
 		| JClass cls		->
-			MethodMap.fold (fun _ ->
-				function
-				| AbstractMethod am -> (@@@) (abstract_meth am)
-				| ConcreteMethod cm -> (@@@) (concrete_meth cm)
+			MethodMap.fold (fun _ m acc ->
+				match m with
+				| AbstractMethod am -> abstract_meth am @@@ acc
+				| ConcreteMethod cm -> concrete_meth cm @@@ acc
 			) cls.c_methods ([], [])
 			|> separate
 			|> FieldMap.fold (fun sigt cf acc ->
@@ -283,11 +313,13 @@ let rec generate_chunk_of_class classes =
 				| `Field_static (name, sigt)	->
 					~% "get_field_static _cls \"%s\" \"%s\"" name sigt
 				| `Field (name, sigt)			->
-					~% "get_field \"%s\" \"%s\"" name sigt
+					~% "get_field _cls \"%s\" \"%s\"" name sigt
 				| `Meth_static (name, sigt)		->
 					~% "get_meth_static _cls \"%s\" \"%s\"" name sigt
 				| `Meth (name, sigt)			->
-					~% "get_meth \"%s\" \"%s\"" name sigt
+					~% "get_meth _cls \"%s\" \"%s\"" name sigt
+				| `Constructor sigt				->
+					~% "get_constructor _cls \"%s\"" sigt
 			in
 			~% "let %s = %s" id (init value)
 		)
@@ -318,21 +350,22 @@ let rec generate_chunk_of_class classes =
 
 		print_endline @@
 		String.concat "\n" @@
-			[ ~% "%s %s : sig" begin_ (module_name cls_name) ]
+			[	~% "(* %s *)" (cn_name cls_name);
+				~% "%s %s : sig" begin_ (module_name cls_name) ]
 			@ indent types
 			@ [ "" ]
 			@ indent mli
-			@ [ ""
+			@ [	"";
 				"	val of_obj : Java.obj -> t' obj";
 				"";
 				"end = struct" ]
 			@ indent types
-			@ [ "";
+			@ [	"";
 				~% "	let _cls = find_class \"%s\"" (cn_name cls_name) ]
 			@ indent (globals !gbls)
 			@ [ "" ]
 			@ indent ml
-			@ [ "";
+			@ [	"";
 				"	let of_obj o = of_obj _cls o";
 				"" ]
 			@ [ "end" ]
