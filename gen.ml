@@ -133,16 +133,10 @@ let rec generate_chunk_of_class classes =
 
 	let class_name = module_name in
 
-	let field_name s =
+	let prefix_uppercase s =
 		if s.[0] = Char.uppercase_ascii s.[0]
 		then "_" ^ s
 		else s
-	in
-
-	let meth_name =
-		function
-		| "<init>"	-> "init_"
-		| s			-> field_name s
 	in
 
 	(* ==== *)
@@ -170,7 +164,7 @@ let rec generate_chunk_of_class classes =
 
 		let static_field sigt =
 			let final ocaml_type value =
-				let name = field_name (fs_name sigt) in
+				let name = prefix_uppercase (fs_name sigt) in
 				[ ~% "val %s : %s" name ocaml_type ],
 				[ ~% "let %s = %s" name value ]
 			in
@@ -186,7 +180,6 @@ let rec generate_chunk_of_class classes =
 				and type_ = fs_type sigt in
 				let fid = alloc (`Field_static (name, jni_sigt type_)) in
 				let _, call_func, ocaml_type = ocaml_java_conv type_ in
-				let name = field_name name in
 				[	~% "val get'%s : unit -> %s" name ocaml_type ],
 				[	~% "let get'%s () =" name;
 					~% "	field_static _cls %s;" fid;
@@ -198,7 +191,6 @@ let rec generate_chunk_of_class classes =
 			and type_ = fs_type sigt in
 			let fid = alloc (`Field (name, jni_sigt type_)) in
 			let _, call_func, ocaml_type = ocaml_java_conv type_ in
-			let name = field_name name in
 			[	~% "val get'%s : _ t -> %s" name ocaml_type ],
 			[	~% "let get'%s obj =" name;
 				~% "	field obj %s;" fid;
@@ -209,7 +201,7 @@ let rec generate_chunk_of_class classes =
 		let meth_args_type =
 			function
 			| []		-> "unit"
-			| args	->
+			| args		->
 				String.concat " -> " @@
 				List.map (fun vt ->
 					let _, _, t = ocaml_java_conv vt in t) args
@@ -221,9 +213,12 @@ let rec generate_chunk_of_class classes =
 		in
 
 		let arg_name = ~% "a%d" in
-		let arg_names args =
-			String.concat " " @@
-			List.mapi (fun i _ -> arg_name i) args
+		let arg_names =
+			function
+			| []		-> "()"
+			| args		->
+				String.concat " " @@
+				List.mapi (fun i _ -> arg_name i) args
 		in
 
 		let arg_calls =
@@ -237,55 +232,124 @@ let rec generate_chunk_of_class classes =
 			let name, args = ms_name sigt, ms_args sigt in
 			let meth_id = alloc (`Meth_static (name, (jni_meth_sigt sigt))) in
 			let call_func, _ = ocaml_java_conv_rtype (ms_rtype sigt) in
-			let name = meth_name name in
-			[	~% "val %s : %s" name (meth_type sigt) ],
-			[	~% "let %s %s =" name (arg_names args);
-				~% "	meth_static _cls %s;" meth_id ]
-			@ arg_calls args @
-			[	~% "	%s ()" call_func ]
+			`Meth_static (prefix_uppercase name, sigt, fun name ->
+				[	~% "val %s : %s" name (meth_type sigt) ],
+				[	~% "let %s %s =" name (arg_names args);
+					~% "	meth_static _cls %s;" meth_id ]
+				@ arg_calls args @
+				[	~% "	%s ()" call_func ])
 		in
 
 		let meth sigt =
 			let name, args = ms_name sigt, ms_args sigt in
 			let meth_id = alloc (`Meth (name, (jni_meth_sigt sigt))) in
 			let call_func, _ = ocaml_java_conv_rtype (ms_rtype sigt) in
-			let name = meth_name name in
-			[	~% "val %s : _ t -> %s" name (meth_type sigt) ],
-			[	~% "let %s obj %s =" name (arg_names args);
-				~% "	meth obj %s;" meth_id ]
-			@ arg_calls args @
-			[	~% "	%s ()" call_func ]
+			`Meth (prefix_uppercase name, sigt, fun name ->
+				[	~% "val %s : _ t -> %s" name (meth_type sigt) ],
+				[	~% "let %s obj %s =" name (arg_names args);
+					~% "	meth obj %s;" meth_id ]
+				@ arg_calls args @
+				[	~% "	%s ()" call_func ])
 		in
 
 		let constructor sigt =
 			let args = ms_args sigt in
 			let meth_id = alloc (`Constructor (jni_meth_sigt sigt)) in
-			[	~% "val new' : %s -> t' obj" (meth_args_type args) ],
-			[	~% "let new' %s =" (arg_names args);
-				~% "	new_ %s;" meth_id ]
-			@ arg_calls args @
-			[	~% "	of_obj_unsafe (call_obj ())" ]
+			`Constructor ("new'", sigt, fun name ->
+				[	~% "val %s : %s -> t' obj" name (meth_args_type args) ],
+				[	~% "let %s %s =" name (arg_names args);
+					~% "	new_ %s;" meth_id ]
+				@ arg_calls args @
+				[	~% "	of_obj_unsafe (call_obj ())" ])
 		in
 
 		let abstract_meth =
 			function
 			| { am_synthetic = true }
-			| { am_access = `Protected }	-> [], []
+			| { am_access = `Protected }	-> `Ignore
 			| { am_signature = s }			-> meth s
 		and concrete_meth =
 			function
 			| { cm_synthetic = true }
-			| { cm_access = (`Protected | `Private) }			-> [], []
-			| { cm_signature = s } when ms_name s = "<clinit>"	-> [], []
+			| { cm_access = (`Protected | `Private) }			-> `Ignore
+			| { cm_signature = s } when ms_name s = "<clinit>"	-> `Ignore
 			| { cm_signature = s } when ms_name s = "<init>"	-> constructor s
 			| { cm_static = true; cm_signature = s }			-> static_meth s
 			| { cm_signature = s; _ }							-> meth s
 		in
 
+		(** Check for name collision and generate unique suffix
+			then call the function generating the code and concat them
+			`meths` is a list of (name * sigt * (name -> result)) *)
+		let resolve_collision meths =
+			let rec mangle = function
+				| TBasic `Bool			-> "B"
+				| TBasic `Byte			-> "Y"
+				| TBasic `Char			-> "C"
+				| TBasic `Double		-> "D"
+				| TBasic `Float			-> "F"
+				| TBasic `Int			-> "I"
+				| TBasic `Long			-> "L"
+				| TBasic `Short			-> "H"
+				| TObject (TArray t)	-> "A" ^ mangle t
+				| TObject (TClass cls) when cn_name cls = "java.lang.String"
+										-> "S"
+				| TObject (TClass cls) when cn_name cls = "java.lang.Object"
+										-> "O"
+				| TObject (TClass cls)	-> cn_simple_name cls
+			in
+			let mangle sigt =
+				String.concat "" @@
+				List.map mangle @@
+				ms_args sigt
+			in
+
+			List.fold_left (fun acc -> function
+				| []					-> acc
+				| [ (name, _, render) ]	-> render name @@@ acc
+				| meths					->
+					List.fold_left (fun acc (name, sigt, render) ->
+						render (name ^ mangle sigt) @@@ acc) acc meths
+			) ([], []) @@
+			List.fold_left (fun lst (name, _, _ as m) ->
+				match lst with
+				| ((name', _, _) :: _ as col) :: tl when name = name' ->
+					(m :: col) :: tl
+				| lst	-> [ m ] :: lst
+			) [] @@
+			List.stable_sort
+				(fun (a_name, a_sigt, _) (b_name, b_sigt, _) ->
+					let (&&&) a b = if a = 0 then b else a in
+					compare a_name b_name &&& ms_compare a_sigt b_sigt)
+				meths
+		in
+
+		(** Split the result of `abstract_meth` and `concrete_meth` in 3 lists:
+				static methods, constructors, methods
+			The order of the methods is reversed *)
+		let split_method_kinds meths =
+			List.fold_left (fun (sm, cm, mm) m ->
+				match m with
+				| `Meth_static m	-> (m :: sm, cm, mm)
+				| `Constructor c	-> (sm, c :: cm, mm)
+				| `Meth m			-> (sm, cm, m :: mm)
+				| `Ignore			-> (sm, cm, mm)
+			) ([], [], []) meths
+		in
+
+		(** split_method_kinds, resolve_collision and concat *)
+		let split_and_resolve_collision meths =
+			let sm, cm, mm = split_method_kinds meths in
+			separate (resolve_collision mm)
+			@@@ separate (resolve_collision cm)
+			@@@ resolve_collision sm
+		in
+
 		function
 		| JInterface intf	->
-			MethodMap.fold (fun _ m acc -> abstract_meth m @@@ acc)
-				intf.i_methods ([], [])
+			MethodMap.fold (fun _ m acc -> abstract_meth m :: acc)
+				intf.i_methods []
+			|> split_and_resolve_collision
 			|> separate
 			|> FieldMap.fold (fun sigt if_ acc ->
 				static_field sigt if_.if_value
@@ -294,9 +358,10 @@ let rec generate_chunk_of_class classes =
 		| JClass cls		->
 			MethodMap.fold (fun _ m acc ->
 				match m with
-				| AbstractMethod am -> abstract_meth am @@@ acc
-				| ConcreteMethod cm -> concrete_meth cm @@@ acc
-			) cls.c_methods ([], [])
+				| AbstractMethod am -> abstract_meth am :: acc
+				| ConcreteMethod cm -> concrete_meth cm :: acc
+			) cls.c_methods []
+			|> split_and_resolve_collision
 			|> separate
 			|> FieldMap.fold (fun sigt cf acc ->
 				(if cf.cf_static
