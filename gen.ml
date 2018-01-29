@@ -13,6 +13,9 @@ let option_to_list =
 let string_replace_char search replace =
 	String.map (fun c -> if c = search then replace else c)
 
+(* Returns the subarray of `a` from `start` to the end of `a` *)
+let array_sub_left a start = Array.sub a start (Array.length a - start)
+
 open Javalib_pack
 open Javalib
 open JBasics
@@ -483,29 +486,48 @@ let rec generate_chunk_of_class classes =
 		class_ "module rec" h;
 		List.iter (class_ "and") tl
 
-(** Returns a table containing the jclass and name of dependencies
-	of the classes in `jar_file` and their dependencies *)
-let classes_with_deps jar_file =
-	let tbl = Hashtbl.create 100 in
-	iter (fun cls_or_intf ->
-		let name, deps = get_deps cls_or_intf in
-		Hashtbl.add tbl name (cls_or_intf, deps);
-	) jar_file;
-	tbl
+(** Returns all classes in `jar_file` *)
+let get_all_classes jar_file =
+	let classes = ref [] in
+	iter (fun c -> classes := c :: !classes) jar_file;
+	!classes
 
-(* Dummy implementation that ignore dependencies
-	and put every classes in a single chunk
-	(it's a bit complex and is almost useless here
-	since there is a lot of cicle in dependencies) *)
-let reorder_by_deps clss =
-	[ Hashtbl.fold (fun _ (cls, _) lst -> cls :: lst) clss [] ]
+(** Returns the classes and their dependencies
+	for the class names in `target_classes`
+	`depth` control the depth to stop searching for dependencies *)
+let get_classes ?(depth=2) jar_file target_classes =
+	let classes = Hashtbl.create 100 in
+	let cp = class_path jar_file in
+
+	let rec get_classes depth cls_name =
+		if not (Hashtbl.mem classes cls_name) && depth > 0
+		then begin
+			try
+				let cls = get_class cp cls_name in
+				Hashtbl.add classes cls_name cls;
+				let _, deps = get_deps cls in
+				List.iter (get_classes (depth - 1)) deps
+			with No_class_found _ ->
+				Printf.eprintf "%s: No class found\n" (cn_name cls_name)
+			| Class_structure_error _ ->
+				Printf.eprintf "%s: Class structure error\n" (cn_name cls_name)
+		end
+	in
+
+	let (<|) a b c = a (b c) in
+	Array.iter (get_classes depth <| make_cn) target_classes;
+	close_class_path cp;
+
+	Hashtbl.fold (fun _ cls l -> cls :: l) classes []
 
 let () =
 	(if Array.length Sys.argv <= 1 then failwith "Missing argument");
-	prerr_endline "begin";
-	let clss = classes_with_deps Sys.argv.(1) in
-	prerr_endline "classes_with_deps";
-	let clss = reorder_by_deps clss in
-	prerr_endline "reorder_by_deps";
-	List.iter generate_chunk_of_class clss;
-	prerr_endline "done"
+	let jar_file = Sys.argv.(1) in
+	let target_classes = array_sub_left Sys.argv 2 in
+
+	let classes =
+		if target_classes = [||]
+		then get_all_classes jar_file
+		else get_classes jar_file target_classes
+	in
+	generate_chunk_of_class classes;
